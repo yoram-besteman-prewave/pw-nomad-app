@@ -1,0 +1,370 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #f8f9fa;
+  color: #1a1a1a;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar - minimalist but visible */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 8px;
+  margin: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #94a3b8 0%, #64748b 100%);
+  border-radius: 8px;
+  border: 2px solid #f1f5f9;
+  min-height: 40px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #64748b 0%, #475569 100%);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: linear-gradient(180deg, #475569 0%, #334155 100%);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox scrollbar support */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #64748b #f1f5f9;
+}
+
+/* Special styling for the queue and backlog panels */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f8fafc;
+  border-radius: 6px;
+  margin: 8px 0;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #cbd5e1 0%, #94a3b8 100%);
+  border-radius: 6px;
+  border: 2px solid #f8fafc;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #94a3b8 0%, #64748b 100%);
+}
+
+/* Timeline horizontal scrollbar */
+.timeline-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.timeline-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 6px;
+  margin: 0 8px;
+}
+
+.timeline-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(90deg, #94a3b8 0%, #64748b 100%);
+  border-radius: 6px;
+  border: 2px solid #f1f5f9;
+}
+
+.timeline-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(90deg, #64748b 0%, #475569 100%);
+}
+
+.ticket-row {
+  @apply bg-white border border-gray-200 rounded transition-all duration-150;
+}
+
+.ticket-row:hover {
+  @apply border-gray-300;
+}
+
+.ticket-row.dragging {
+  @apply shadow-md opacity-70;
+}
+
+.ticket-row.locked-shake {
+  animation: shake 0.4s ease-in-out;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-3px); }
+  40%, 80% { transform: translateX(3px); }
+}
+
+.animate-shake {
+  animation: shake 0.4s ease-in-out;
+}
+
+.pool-item {
+  @apply bg-white border border-gray-200 rounded transition-all duration-150;
+}
+
+.pool-item:hover {
+  @apply border-gray-300;
+}
+
+.pool-item.dragging {
+  @apply shadow-md opacity-70;
+}
+
+.drop-zone {
+  @apply border-2 border-dashed border-gray-300 rounded-lg transition-colors;
+}
+
+.drop-zone.drag-over {
+  @apply border-blue-400 bg-blue-50;
+}
+
+.week-divider {
+  @apply bg-gray-700 text-white text-[10px] font-medium px-2 py-0.5 rounded;
+}
+
+/* Modal */
+.modal-overlay {
+  animation: fadeIn 0.1s ease-out;
+}
+
+.modal-content {
+  animation: slideUp 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Panel */
+.detail-panel {
+  animation: slideIn 0.15s ease-out;
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* Toast notification */
+.toast {
+  animation: toastIn 0.3s ease-out;
+}
+
+.toast.toast-exit {
+  animation: toastOut 0.2s ease-in forwards;
+}
+
+@keyframes toastIn {
+  from { 
+    opacity: 0; 
+    transform: translateX(100px); 
+  }
+  to { 
+    opacity: 1; 
+    transform: translateX(0); 
+  }
+}
+
+@keyframes toastOut {
+  from { 
+    opacity: 1; 
+    transform: translateX(0); 
+  }
+  to { 
+    opacity: 0; 
+    transform: translateX(100px); 
+  }
+}
+
+/* Highlight animation for shared links - very prominent */
+.highlight-ticket {
+  animation: highlight-blink 0.4s ease-in-out 6;
+  border-radius: 8px;
+  position: relative;
+}
+
+@keyframes highlight-blink {
+  0%, 100% { 
+    background-color: transparent; 
+    box-shadow: none;
+    transform: scale(1);
+  }
+  50% { 
+    background-color: rgba(251, 191, 36, 0.5); 
+    box-shadow: 0 0 0 5px rgba(251, 191, 36, 0.6), 0 0 30px rgba(251, 191, 36, 0.5);
+    transform: scale(1.02);
+  }
+}
+
+/* Striped patterns for overspill capacity indicator - VERY visible */
+.bg-stripes-blue {
+  background: repeating-linear-gradient(
+    45deg,
+    #3b82f6 0px,
+    #3b82f6 2px,
+    #ffffff 2px,
+    #ffffff 4px
+  ) !important;
+  background-size: 5.66px 5.66px !important;
+}
+
+.bg-stripes-amber {
+  background: repeating-linear-gradient(
+    45deg,
+    #f59e0b 0px,
+    #f59e0b 2px,
+    #ffffff 2px,
+    #ffffff 4px
+  ) !important;
+  background-size: 5.66px 5.66px !important;
+}
+
+.bg-stripes-slate {
+  background: repeating-linear-gradient(
+    45deg,
+    #64748b 0px,
+    #64748b 2px,
+    #ffffff 2px,
+    #ffffff 4px
+  ) !important;
+  background-size: 5.66px 5.66px !important;
+}
+
+/* Urgent ticket - subtle red diagonal stripes */
+.bg-stripes-red-subtle {
+  background: repeating-linear-gradient(
+    -45deg,
+    #fef2f2 0px,
+    #fef2f2 8px,
+    #fecaca 8px,
+    #fecaca 10px
+  ) !important;
+}
+
+/* Ready to jump - subtle green accent */
+.bg-ready-jump {
+  background: linear-gradient(90deg, #d1fae5 0%, #ecfdf5 20%, #ffffff 100%) !important;
+}
+
+/* NoMAD Loading Screen Animations */
+
+/* Ticket placeholder pop-in animation */
+@keyframes ticket-pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.8) translateY(10px);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.03) translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.ticket-pop-in {
+  opacity: 0;
+  animation: ticket-pop-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Compass navigator - smooth path between tickets */
+@keyframes compass-navigate {
+  0% {
+    transform: translate(60px, 12px) rotate(-10deg);
+  }
+  12% {
+    transform: translate(150px, 8px) rotate(5deg);
+  }
+  25% {
+    transform: translate(300px, 15px) rotate(-5deg);
+  }
+  37% {
+    transform: translate(100px, 75px) rotate(8deg);
+  }
+  50% {
+    transform: translate(350px, 82px) rotate(-8deg);
+  }
+  62% {
+    transform: translate(50px, 145px) rotate(5deg);
+  }
+  75% {
+    transform: translate(300px, 150px) rotate(-5deg);
+  }
+  87% {
+    transform: translate(120px, 215px) rotate(8deg);
+  }
+  100% {
+    transform: translate(60px, 12px) rotate(-10deg);
+  }
+}
+
+.compass-navigator {
+  animation: compass-navigate 6s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Question mark pop animation */
+@keyframes question-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0) rotate(-20deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2) rotate(10deg);
+  }
+  70% {
+    transform: scale(0.9) rotate(-5deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes question-float {
+  0%, 100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-4px) rotate(5deg);
+  }
+}
+
+.question-pop {
+  opacity: 0;
+  animation: question-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards,
+             question-float 2s ease-in-out infinite 0.6s;
+}

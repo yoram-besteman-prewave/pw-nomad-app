@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build outputs (we build fresh in Docker)
+frontend/dist/
+backend/static/
+
+# Development files
+.git/
+.gitignore
+.env.local
+.env.development
+*.md
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
