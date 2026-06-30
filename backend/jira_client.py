@@ -15,6 +15,7 @@ class JiraClient:
     # Project keys
     PRES_PROJECT_KEY = "PRES"  # Pre-screening project
     FST_PROJECT_KEY = "FST"   # Full screening team project
+    PREMAP_PROJECT_KEY = os.getenv("PREMAP_PROJECT_KEY", "PREMAP")  # Tier-N pre-mapping project
     
     # OAuth 2.0 credentials for NoMAD App service account
     # This will show as "NoMAD App" in Jira history
@@ -105,6 +106,12 @@ class JiraClient:
         """Get the Jira API base URL"""
         cloud_id = self._get_cloud_id()
         return f"{self.ATLASSIAN_API_BASE}/ex/jira/{cloud_id}/rest/api/3"
+
+    @property
+    def agile_base_url(self) -> str:
+        """Get the Jira Software Agile API base URL"""
+        cloud_id = self._get_cloud_id()
+        return f"{self.ATLASSIAN_API_BASE}/ex/jira/{cloud_id}/rest/agile/1.0"
     
     def _get_headers(self) -> dict:
         """Get authorization headers"""
@@ -118,7 +125,19 @@ class JiraClient:
         with httpx.Client(timeout=30.0) as client:
             response = client.request(method, url, headers=headers, **kwargs)
             response.raise_for_status()
-            if response.status_code == 204:
+            if response.status_code == 204 or not response.content:
+                return {}
+            return response.json()
+
+    def _make_agile_request(self, method: str, endpoint: str, **kwargs) -> dict:
+        """Make an authenticated request to Jira Software Agile API"""
+        url = f"{self.agile_base_url}/{endpoint}"
+        headers = self._get_headers()
+
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(method, url, headers=headers, **kwargs)
+            response.raise_for_status()
+            if response.status_code == 204 or not response.content:
                 return {}
             return response.json()
     
@@ -131,6 +150,262 @@ class JiraClient:
         }
         result = self._make_request("POST", "search/jql", json=payload)
         return result.get("issues", [])
+
+    def _scheme_id_from_project_response(self, response: dict, scheme_key: str, id_key: str = "id") -> Optional[int]:
+        """Extract a scheme id from Jira's project-to-scheme lookup response."""
+        values = response.get("values") or []
+        if not values:
+            return None
+
+        scheme = values[0].get(scheme_key) or {}
+        scheme_id = scheme.get(id_key)
+        return int(scheme_id) if scheme_id is not None else None
+
+    def _project_exists(self, project_key: str) -> Optional[dict]:
+        """Return project data if a Jira project exists, otherwise None."""
+        try:
+            return self._make_request("GET", f"project/{project_key}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
+
+    def _get_premap_project_payload(self, source_project_key: str, target_project_key: str, target_name: str) -> dict:
+        """Build a company-managed project payload that shares PRES's schemes."""
+        source_project = self._make_request("GET", f"project/{source_project_key}")
+        source_project_id = source_project.get("id")
+        if not source_project_id:
+            raise RuntimeError(f"Could not determine project id for {source_project_key}")
+
+        workflow_scheme_id = self._scheme_id_from_project_response(
+            self._make_request("GET", f"workflowscheme/project?projectId={source_project_id}"),
+            "workflowScheme",
+        )
+        issue_type_scheme_id = self._scheme_id_from_project_response(
+            self._make_request("GET", f"issuetypescheme/project?projectId={source_project_id}"),
+            "issueTypeScheme",
+        )
+        issue_type_screen_scheme_id = self._scheme_id_from_project_response(
+            self._make_request("GET", f"issuetypescreenscheme/project?projectId={source_project_id}"),
+            "issueTypeScreenScheme",
+        )
+        field_configuration_scheme_id = self._scheme_id_from_project_response(
+            self._make_request("GET", f"fieldconfigurationscheme/project?projectId={source_project_id}"),
+            "fieldConfigurationScheme",
+        )
+        permission_scheme = self._make_request("GET", f"project/{source_project_key}/permissionscheme")
+        notification_scheme_response = self._make_request("GET", f"notificationscheme/project?projectId={source_project_id}")
+        notification_values = notification_scheme_response.get("values") or []
+
+        lead = source_project.get("lead") or {}
+        lead_account_id = lead.get("accountId")
+        if not lead_account_id:
+            raise RuntimeError(f"Could not determine project lead for {source_project_key}")
+
+        payload = {
+            "key": target_project_key,
+            "name": target_name,
+            "projectTypeKey": source_project.get("projectTypeKey", "software"),
+            "description": f"Tier-N requests project mirrored from {source_project_key}.",
+            "leadAccountId": lead_account_id,
+            "assigneeType": source_project.get("assigneeType", "UNASSIGNED"),
+        }
+
+        category = source_project.get("projectCategory") or {}
+        if category.get("id"):
+            payload["categoryId"] = int(category["id"])
+
+        if workflow_scheme_id:
+            payload["workflowScheme"] = workflow_scheme_id
+        if issue_type_scheme_id:
+            payload["issueTypeScheme"] = issue_type_scheme_id
+        if issue_type_screen_scheme_id:
+            payload["issueTypeScreenScheme"] = issue_type_screen_scheme_id
+        if field_configuration_scheme_id:
+            payload["fieldConfigurationScheme"] = field_configuration_scheme_id
+        if permission_scheme.get("id"):
+            payload["permissionScheme"] = int(permission_scheme["id"])
+        if notification_values and notification_values[0].get("notificationSchemeId"):
+            payload["notificationScheme"] = int(notification_values[0]["notificationSchemeId"])
+
+        return payload
+
+    def _copy_project_role_actors(self, source_project_key: str, target_project_key: str) -> list[dict]:
+        """Copy project-role actors from PRES into the target project."""
+        copied_roles = []
+        source_roles = self._make_request("GET", f"project/{source_project_key}/role")
+
+        for role_name, role_url in source_roles.items():
+            role_id = role_url.rstrip("/").split("/")[-1]
+            source_role = self._make_request("GET", f"project/{source_project_key}/role/{role_id}")
+            target_role = self._make_request("GET", f"project/{target_project_key}/role/{role_id}")
+            actors = source_role.get("actors") or []
+            target_actors = target_role.get("actors") or []
+            existing_users = {
+                (actor.get("actorUser") or {}).get("accountId")
+                for actor in target_actors
+                if (actor.get("actorUser") or {}).get("accountId")
+            }
+            existing_group_ids = {
+                (actor.get("actorGroup") or {}).get("groupId")
+                for actor in target_actors
+                if (actor.get("actorGroup") or {}).get("groupId")
+            }
+            existing_groups = {
+                (actor.get("actorGroup") or {}).get("name")
+                for actor in target_actors
+                if (actor.get("actorGroup") or {}).get("name")
+            }
+            users = []
+            groups = []
+            group_ids = []
+
+            for actor in actors:
+                actor_user = actor.get("actorUser") or {}
+                account_id = actor_user.get("accountId")
+                if account_id and account_id not in existing_users:
+                    users.append(account_id)
+                    continue
+
+                actor_group = actor.get("actorGroup") or {}
+                group_id = actor_group.get("groupId")
+                group_name = actor_group.get("name")
+                if group_id and group_id not in existing_group_ids:
+                    group_ids.append(group_id)
+                elif group_name and group_name not in existing_groups:
+                    groups.append(group_name)
+
+            payload = {}
+            if users:
+                payload["user"] = users
+            if group_ids:
+                payload["groupId"] = group_ids
+            if groups:
+                payload["group"] = groups
+
+            if not payload:
+                copied_roles.append({"role": role_name, "actors": 0, "status": "already_synced"})
+                continue
+
+            try:
+                self._make_request("POST", f"project/{target_project_key}/role/{role_id}", json=payload)
+                copied_roles.append({"role": role_name, "actors": len(users) + len(group_ids) + len(groups), "status": "copied"})
+            except httpx.HTTPStatusError as e:
+                # Some Jira role actors may be implicitly inherited or auto-added by project creation.
+                # Keep copying the remaining roles and surface the per-role warning in the result.
+                copied_roles.append({
+                    "role": role_name,
+                    "actors": len(users) + len(group_ids) + len(groups),
+                    "status": "warning",
+                    "error": f"{e.response.status_code}: {e.response.text[:300]}",
+                })
+
+        return copied_roles
+
+    def _create_premap_filter(self, target_project_key: str, filter_name: str) -> dict:
+        """Create or reuse a Jira filter for the Tier-N project."""
+        jql = f"project = {target_project_key} ORDER BY Rank ASC"
+        created_filter = None
+
+        try:
+            existing = self._make_request("GET", "filter/search", params={"filterName": filter_name})
+            for candidate in existing.get("values", []):
+                if candidate.get("name") == filter_name:
+                    created_filter = candidate
+                    break
+        except httpx.HTTPStatusError as e:
+            print(f"[NoMAD] Could not search for existing {board_name} filter: {e}")
+
+        if not created_filter:
+            created_filter = self._make_request("POST", "filter", json={
+                "name": filter_name,
+                "description": f"Filter for {filter_name}.",
+                "jql": jql,
+                "favourite": False,
+            })
+
+        return created_filter
+
+    def _create_premap_board(self, filter_id: str, board_name: str) -> dict:
+        """Create or reuse a Jira Software board for the Tier-N project."""
+        try:
+            boards = self._make_agile_request("GET", "board", params={"name": board_name})
+            for board in boards.get("values", []):
+                if board.get("name") == board_name:
+                    return {"board": board, "board_created": False}
+        except httpx.HTTPStatusError as e:
+            print(f"[NoMAD] Could not search Jira Software boards for {board_name}: {e}")
+
+        board = self._make_agile_request("POST", "board", json={
+            "name": board_name,
+            "type": "kanban",
+            "filterId": int(filter_id),
+        })
+        return {"board": board, "board_created": True}
+
+    def create_premap_project(self) -> dict:
+        """
+        Create the CS Premap project and board by sharing PRES's company-managed schemes.
+
+        The project creation is idempotent. Board creation depends on Jira Software Agile API
+        scopes; if those scopes are absent, the returned result includes a board warning.
+        """
+        source_project_key = self.PRES_PROJECT_KEY
+        target_project_key = self.PREMAP_PROJECT_KEY
+        board_name = "CS Premap"
+
+        result = {
+            "project_key": target_project_key,
+            "project_created": False,
+            "roles_copied": [],
+            "filter": None,
+            "board": None,
+            "warnings": [],
+        }
+
+        existing_project = self._project_exists(target_project_key)
+        if existing_project:
+            result["project"] = existing_project
+            print(f"[NoMAD] Jira project {target_project_key} already exists")
+        else:
+            payload = self._get_premap_project_payload(source_project_key, target_project_key, board_name)
+            created_project = self._make_request("POST", "project", json=payload)
+            result["project"] = created_project
+            result["project_created"] = True
+            print(f"[NoMAD] Created Jira project {target_project_key} ({board_name})")
+
+        try:
+            result["roles_copied"] = self._copy_project_role_actors(source_project_key, target_project_key)
+        except httpx.HTTPStatusError as e:
+            warning = f"Could not copy project role actors: {e.response.status_code} {e.response.text[:500]}"
+            print(f"[NoMAD] {warning}")
+            result["warnings"].append(warning)
+
+        try:
+            created_filter = self._create_premap_filter(target_project_key, board_name)
+            result["filter"] = created_filter
+        except httpx.HTTPStatusError as e:
+            warning = f"Could not create Jira filter. HTTP {e.response.status_code}: {e.response.text[:500]}"
+            print(f"[NoMAD] {warning}")
+            result["warnings"].append(warning)
+
+        filter_id = (result["filter"] or {}).get("id")
+        if filter_id:
+            try:
+                board_result = self._create_premap_board(filter_id, board_name)
+                result["board"] = board_result["board"]
+                result["board_created"] = board_result["board_created"]
+            except httpx.HTTPStatusError as e:
+                warning = (
+                    "Could not create Jira Software board. "
+                    f"HTTP {e.response.status_code}: {e.response.text[:500]}"
+                )
+                print(f"[NoMAD] {warning}")
+                result["warnings"].append(warning)
+        else:
+            result["warnings"].append("Skipped Jira Software board creation because no filter id was available.")
+
+        return result
     
     def _parse_lines(self, lines_value) -> tuple[int, bool]:
         """Parse the lines custom field value. Returns (lines, has_value)"""
@@ -204,9 +479,10 @@ class JiraClient:
             print(f"Error fetching comments for {issue_key}: {e}")
         return comments
     
-    def get_screening_tickets(self) -> list[Ticket]:
-        """Fetch PRES screening tickets - including those without Total Count"""
-        jql = "project = PRES AND status != Done ORDER BY created DESC"
+    def get_screening_tickets(self, project_key: str | None = None) -> list[Ticket]:
+        """Fetch screening tickets - including those without Total Count"""
+        effective_project_key = project_key or self.PRES_PROJECT_KEY
+        jql = f"project = {effective_project_key} AND status != Done ORDER BY created DESC"
         
         fields = [
             "summary",
