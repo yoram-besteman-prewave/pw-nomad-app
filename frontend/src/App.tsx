@@ -20,6 +20,7 @@ import { useDroppable } from '@dnd-kit/core';
 import { useAuth } from './hooks/useAuth';
 import { usePresence } from './hooks/usePresence';
 import { useJiraTickets } from './hooks/useJiraTickets';
+import { useEmptyBoard } from './hooks/useEmptyBoard';
 import { LoginScreen } from './components/LoginScreen';
 import { SessionWarning } from './components/SessionWarning';
 import { UserPresence } from './components/UserPresence';
@@ -40,6 +41,9 @@ import type { Ticket } from './types/ticket';
 // App version - keep in sync with backend
 const APP_VERSION = 'v0.2.0';
 import { getTicketSize, isSchedulable, getScheduleBlockReason, getScheduledBySize, canScheduleTicket, getCurrentWeekAndYear } from './types/ticket';
+
+type BoardData = ReturnType<typeof useJiraTickets>;
+type BoardTab = 'screening' | 'tiern';
 
 // Custom modifier to snap drag overlay center to cursor for consistent feel
 const snapCenterToCursor: Modifier = ({ activatorEvent, draggingNodeRect, transform }) => {
@@ -394,6 +398,7 @@ function CapacityOverflowDialog({
 function App() {
   // Auth state
   const auth = useAuth();
+  const [activeTab, setActiveTab] = useState<BoardTab>('screening');
   
   // Session invalidation handling - at App level BEFORE AuthenticatedApp renders
   const [sessionInvalidatedMessage, setSessionInvalidatedMessage] = useState<string | null>(null);
@@ -471,27 +476,68 @@ function App() {
   }
 
   return (
-    <AuthenticatedApp 
-      auth={auth} 
-      presenceUsers={presenceUsers} 
-      cursors={cursors}
-      presenceConnected={presenceConnected}
-      pendingDataUpdate={pendingDataUpdate}
-      onDataUpdateHandled={() => setPendingDataUpdate(false)}
-    />
+    activeTab === 'screening' ? (
+      <ScreeningApp
+        auth={auth}
+        presenceUsers={presenceUsers}
+        cursors={cursors}
+        presenceConnected={presenceConnected}
+        pendingDataUpdate={pendingDataUpdate}
+        onDataUpdateHandled={() => setPendingDataUpdate(false)}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+      />
+    ) : (
+      <TierNApp
+        auth={auth}
+        presenceUsers={presenceUsers}
+        cursors={cursors}
+        presenceConnected={presenceConnected}
+        pendingDataUpdate={pendingDataUpdate}
+        onDataUpdateHandled={() => setPendingDataUpdate(false)}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+      />
+    )
   );
 }
 
-interface AuthenticatedAppProps {
+interface BoardAppProps {
   auth: ReturnType<typeof useAuth>;
   presenceUsers: Array<{ email: string; name: string; picture: string }>;
   cursors: Map<string, { x: number; y: number }>;
   presenceConnected: boolean;
   pendingDataUpdate: boolean;
   onDataUpdateHandled: () => void;
+  activeTab: BoardTab;
+  onTabChange: (tab: BoardTab) => void;
 }
 
-function AuthenticatedApp({ auth, presenceUsers, cursors, presenceConnected, pendingDataUpdate, onDataUpdateHandled }: AuthenticatedAppProps) {
+function ScreeningApp(props: BoardAppProps) {
+  const board = useJiraTickets();
+  return <AuthenticatedApp {...props} board={board} />;
+}
+
+function TierNApp(props: BoardAppProps) {
+  const board = useEmptyBoard();
+  return <AuthenticatedApp {...props} board={board} />;
+}
+
+interface AuthenticatedAppProps extends BoardAppProps {
+  board: BoardData;
+}
+
+function AuthenticatedApp({
+  auth,
+  presenceUsers,
+  cursors,
+  presenceConnected,
+  pendingDataUpdate,
+  onDataUpdateHandled,
+  activeTab,
+  onTabChange,
+  board,
+}: AuthenticatedAppProps) {
   const {
     queueTickets, setQueueTickets,
     poolTickets, setPoolTickets,
@@ -519,7 +565,7 @@ function AuthenticatedApp({ auth, presenceUsers, cursors, presenceConnected, pen
     jumpedTickets,
     processJumpedTickets,
     clearJumpedNotification,
-  } = useJiraTickets();
+  } = board;
 
   // Handle pending data updates from other users (triggered via WebSocket)
   useEffect(() => {
@@ -1902,6 +1948,30 @@ function AuthenticatedApp({ auth, presenceUsers, cursors, presenceConnected, pen
           <span className="text-xs text-gray-500">
             {queueTickets.length} queued · {totalQueueLines.toLocaleString()} lines · ~{estimatedWeeks}w
           </span>
+          <div className="flex items-center rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+            <button
+              type="button"
+              onClick={() => onTabChange('screening')}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                activeTab === 'screening'
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Screening
+            </button>
+            <button
+              type="button"
+              onClick={() => onTabChange('tiern')}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                activeTab === 'tiern'
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Tier-N Mapping
+            </button>
+          </div>
           {isSaving && <span className="text-xs text-gray-400">Saving...</span>}
           {/* Connection status indicator */}
           <span className="flex items-center gap-1 text-[10px] text-gray-400" title={presenceConnected ? 'Real-time sync active' : 'Reconnecting...'}>

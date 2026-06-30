@@ -801,7 +801,7 @@ def detect_mismatch(ticket: Ticket, schedule: dict) -> tuple[bool, str | None]:
 
 @app.get("/api/tickets", response_model=list[Ticket])
 async def get_tickets(request: Request):
-    """Fetch all eligible screening tickets from Jira PRES board"""
+    """Fetch all eligible screening tickets from the selected Jira board/project"""
     user = await get_current_user(request)
     if not user:
         ip, user_agent = get_client_info(request)
@@ -810,7 +810,16 @@ async def get_tickets(request: Request):
     
     try:
         client = JiraClient()
-        tickets = client.get_screening_tickets()
+        project_key = (
+            request.query_params.get("project_key")
+            or request.query_params.get("project")
+            or JiraClient.PRES_PROJECT_KEY
+        ).upper()
+        allowed_project_keys = {JiraClient.PRES_PROJECT_KEY, JiraClient.PREMAP_PROJECT_KEY}
+        if project_key not in allowed_project_keys:
+            raise HTTPException(status_code=400, detail=f"Unsupported Jira project: {project_key}")
+
+        tickets = client.get_screening_tickets(project_key=project_key)
         
         # Apply saved priority order, lock info, and queue status from database/cache
         # Also detect mismatches between Jira and NoMAD
@@ -1357,9 +1366,13 @@ async def jump_ticket(request: Request):
     ip, user_agent = get_client_info(request)
     body = await request.json()
     ticket_key = body.get("ticket_key")
+    project_key = (body.get("project_key") or body.get("project") or JiraClient.PRES_PROJECT_KEY).upper()
     
     if not ticket_key:
         raise HTTPException(status_code=400, detail="ticket_key is required")
+    allowed_project_keys = {JiraClient.PRES_PROJECT_KEY, JiraClient.PREMAP_PROJECT_KEY}
+    if project_key not in allowed_project_keys:
+        raise HTTPException(status_code=400, detail=f"Unsupported Jira project: {project_key}")
     
     try:
         client = JiraClient()
@@ -1394,12 +1407,14 @@ async def jump_ticket(request: Request):
             await log_user_activity(user, "ticket_jumped", {
                 "ticket_key": ticket_key,
                 "fst_key": fst_key,
+                "project_key": project_key,
             }, ip, user_agent)
             
             # Broadcast to all clients
             await broadcast_data_update("ticket_jumped", user.email, {
                 "ticket_key": ticket_key,
                 "fst_key": fst_key,
+                "project_key": project_key,
             })
             
             print(f"[Jump] Ticket {ticket_key} jumped by {user.email} -> FST: {fst_key}")
