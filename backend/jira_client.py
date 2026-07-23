@@ -729,33 +729,6 @@ class JiraClient:
             print(f"Error updating due date for {ticket_key}: {e}")
             return False, week, year
     
-    def set_screening_start_date(self, ticket_key: str, week: int, year: int) -> bool:
-        """Set the Screening Start Date to the Monday of the given ISO week.
-
-        Used on the FST ticket at approval so the handoff shows when screening is
-        scheduled to *start* (Monday of the start week), separate from the due date
-        (Friday of the final week).
-        """
-        try:
-            jan4 = datetime(year, 1, 4)  # Jan 4 is always in ISO week 1
-            days_to_monday = jan4.weekday()
-            week1_monday = jan4 - timedelta(days=days_to_monday)
-            target_monday = week1_monday + timedelta(weeks=week - 1)
-            start_date_str = target_monday.strftime('%Y-%m-%d')
-
-            payload = {"fields": {self.SCREENING_START_DATE_FIELD: start_date_str}}
-            url = f"{self.base_url}/issue/{ticket_key}"
-            headers = self._get_headers()
-            with httpx.Client(timeout=30.0) as client:
-                response = client.put(url, headers=headers, json=payload)
-                response.raise_for_status()
-
-            print(f"[NoMAD App] Set start date for {ticket_key}: {start_date_str} (Mon of W{week}/{year})")
-            return True
-        except Exception as e:
-            print(f"Error setting start date for {ticket_key}: {e}")
-            return False
-
     def clear_due_date(self, ticket_key: str) -> bool:
         """Clear the due date of a ticket (used for resetting mismatched tickets)"""
         try:
@@ -1003,6 +976,61 @@ class JiraClient:
             print(f"Error fetching full data for {ticket_key}: {e}")
             return None
 
+    def _get_creatable_field_ids(self, project_key: str, issue_type_id: str) -> set:
+        """Return the set of field IDs available on the create screen for an issue type."""
+        try:
+            result = self._make_request(
+                "GET", f"issue/createmeta/{project_key}/issuetypes/{issue_type_id}"
+            )
+            fields = result.get("fields", []) or []
+            return {f.get("fieldId") for f in fields if f.get("fieldId")}
+        except Exception as e:
+            print(f"[NoMAD] Could not fetch createmeta for {project_key}/{issue_type_id}: {e}")
+            return set()
+
+    def set_fst_screening_dates(
+        self, ticket_key: str, week: int, year: int, lines: int = 0, weekly_capacity: int = 4000
+    ) -> tuple[bool, int, int]:
+        """Set the FST ticket's screening dates using ONLY the custom fields (no system
+        `duedate`, which is not on the FST screen and would 400):
+          - Screening Start Date (customfield_10129) = Monday of the start week.
+          - Screening Due date  (customfield_10127) = Friday of the final week.
+
+        Returns: (success, final_week, final_year).
+        """
+        try:
+            # Final week = start week + spanned weeks - 1 (for tickets over weekly capacity).
+            weeks_needed = (lines + weekly_capacity - 1) // weekly_capacity if (lines and lines > weekly_capacity) else 1
+            final_week = week + weeks_needed - 1
+            final_year = year
+            while final_week > 52:
+                final_week -= 52
+                final_year += 1
+
+            def _monday(w: int, y: int) -> datetime:
+                jan4 = datetime(y, 1, 4)
+                return jan4 - timedelta(days=jan4.weekday()) + timedelta(weeks=w - 1)
+
+            start_str = _monday(week, year).strftime('%Y-%m-%d')
+            due_str = (_monday(final_week, final_year) + timedelta(days=4)).strftime('%Y-%m-%d')  # Friday
+
+            payload = {"fields": {
+                self.SCREENING_START_DATE_FIELD: start_str,
+                self.SCREENING_DUE_DATE_FIELD: due_str,
+            }}
+            url = f"{self.base_url}/issue/{ticket_key}"
+            headers = self._get_headers()
+            with httpx.Client(timeout=30.0) as client:
+                response = client.put(url, headers=headers, json=payload)
+                response.raise_for_status()
+
+            print(f"[NoMAD App] Set FST {ticket_key} dates: start={start_str} (Mon W{week}/{year}), "
+                  f"due={due_str} (Fri W{final_week}/{final_year})")
+            return True, final_week, final_year
+        except Exception as e:
+            print(f"Error setting FST screening dates for {ticket_key}: {e}")
+            return False, week, year
+
     def create_fst_ticket(self, pres_ticket_key: str) -> Optional[str]:
         """
         Create a copy of a PRES ticket on the FST board.
@@ -1100,9 +1128,26 @@ class JiraClient:
             if fields.get("labels"):
                 new_fields["labels"] = fields["labels"]
             
+            # Only send fields that the target issue type's create screen actually accepts.
+            # Different FST issue types expose different fields (e.g. "Screening and Validation"
+            # has no system `duedate` or `labels`), and Jira 400s on any field not on the screen.
+            allowed = self._get_creatable_field_ids(self.FST_PROJECT_KEY, issue_type_id)
+            if allowed:
+                mandatory = {"project", "issuetype", "summary"}
+                dropped = [k for k in new_fields if k not in allowed and k not in mandatory]
+                if dropped:
+                    print(f"[NoMAD] Dropping fields not on FST '{chosen}' screen: {dropped}")
+                new_fields = {k: v for k, v in new_fields.items() if k in allowed or k in mandatory}
+            
             # Create the ticket
             payload = {"fields": new_fields}
-            result = self._make_request("POST", "issue", json=payload)
+            try:
+                result = self._make_request("POST", "issue", json=payload)
+            except httpx.HTTPStatusError as e:
+                body = e.response.text[:500] if e.response is not None else ""
+                print(f"[NoMAD] FST create 400 for {pres_ticket_key}. Payload fields: "
+                      f"{list(new_fields.keys())}. Response: {body}")
+                raise
             
             new_key = result.get("key")
             if new_key:
@@ -1254,12 +1299,13 @@ class JiraClient:
             return result
         result["fst_key"] = fst_key
 
-        # Step 4: Schedule the FST copy to the same agreed week.
-        #   - Screening Due date  = Friday of the final week (deadline).
+        # Step 4: Schedule the FST copy to the same agreed week using the custom Screening
+        # fields only (the FST screen has no system `duedate`):
         #   - Screening Start Date = Monday of the start week (when work is scheduled to begin).
+        #   - Screening Due date   = Friday of the final week (deadline).
         if week is not None and year is not None:
             try:
-                ok_fst, _, _ = self.update_due_date(
+                ok_fst, _, _ = self.set_fst_screening_dates(
                     fst_key, int(week), int(year), lines=lines, weekly_capacity=weekly_capacity
                 )
                 result["scheduled"] = ok_fst
@@ -1268,14 +1314,6 @@ class JiraClient:
             except Exception as e:
                 print(f"[NoMAD] Error scheduling FST {fst_key}: {e}")
                 warnings.append(f"scheduling FST ticket {fst_key} failed ({e})")
-
-            # Start date = Monday of the (start) week passed in.
-            try:
-                if not self.set_screening_start_date(fst_key, int(week), int(year)):
-                    warnings.append(f"setting start date on FST ticket {fst_key} failed")
-            except Exception as e:
-                print(f"[NoMAD] Error setting start date on FST {fst_key}: {e}")
-                warnings.append(f"setting start date on FST ticket {fst_key} failed ({e})")
 
         # Step 5: Link FST <-> PRES.
         try:
