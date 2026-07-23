@@ -16,6 +16,11 @@ class JiraClient:
     PRES_PROJECT_KEY = "PRES"  # Pre-screening project
     FST_PROJECT_KEY = "FST"   # Full screening team project
     PREMAP_PROJECT_KEY = os.getenv("PREMAP_PROJECT_KEY", "PREMAP")  # Tier-N pre-mapping project
+
+    # Issue type used for handed-off screening work created on the FST board. The FST
+    # project has no "CS Request" type, so without this the copy would fall back to the
+    # first available type (Epic), which is wrong. Configurable via env.
+    FST_ISSUE_TYPE = os.getenv("FST_ISSUE_TYPE", "Screening and Validation")
     
     # OAuth 2.0 credentials for NoMAD App service account
     # This will show as "NoMAD App" in Jira history
@@ -992,29 +997,44 @@ class JiraClient:
                 print(f"[NoMAD] Could not find FST project")
                 return None
             
-            # Get the default issue type for FST (usually "Task" or similar)
-            # We'll try to match the source issue type, or default to Task
-            source_issue_type = fields.get("issuetype", {}).get("name", "Task")
-            
-            # Get available issue types for FST project
+            # Choose the FST issue type for the handoff copy.
             fst_issue_types = fst_project.get("issueTypes", [])
-            issue_type_id = None
-            
-            for it in fst_issue_types:
-                if it.get("name") == source_issue_type:
-                    issue_type_id = it.get("id")
-                    break
-            
-            # If no match, use the first available (non-subtask) issue type
-            if not issue_type_id:
+
+            def _find_type(predicate) -> Optional[str]:
                 for it in fst_issue_types:
-                    if not it.get("subtask", False):
-                        issue_type_id = it.get("id")
-                        break
-            
+                    if predicate(it):
+                        return it.get("id")
+                return None
+
+            # 1) Preferred, configured screening type (e.g. "Screening and Validation").
+            issue_type_id = _find_type(
+                lambda it: it.get("name", "").lower() == self.FST_ISSUE_TYPE.lower()
+                and not it.get("subtask", False)
+            )
+            # 2) Match the source issue type name (won't match for CS Request, but future-proof).
+            if not issue_type_id:
+                source_issue_type = fields.get("issuetype", {}).get("name", "")
+                issue_type_id = _find_type(
+                    lambda it: it.get("name", "").lower() == source_issue_type.lower()
+                    and not it.get("subtask", False)
+                )
+            # 3) Fallback: a standard (hierarchy level 0) task-like type — never an Epic/subtask.
+            if not issue_type_id:
+                issue_type_id = _find_type(
+                    lambda it: not it.get("subtask", False)
+                    and it.get("hierarchyLevel", 0) == 0
+                    and it.get("name", "").lower() != "epic"
+                )
+            # 4) Last resort: any non-subtask type.
+            if not issue_type_id:
+                issue_type_id = _find_type(lambda it: not it.get("subtask", False))
+
             if not issue_type_id:
                 print(f"[NoMAD] No suitable issue type found for FST project")
                 return None
+
+            chosen = next((it.get("name") for it in fst_issue_types if it.get("id") == issue_type_id), "?")
+            print(f"[NoMAD] FST copy of {pres_ticket_key} will use issue type '{chosen}' ({issue_type_id})")
             
             # Build the new ticket payload
             # Copy key fields from source

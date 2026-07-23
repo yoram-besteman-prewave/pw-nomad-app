@@ -80,8 +80,9 @@ When a ticket is scheduled, NoMAD sets the **due date = Friday of the assigned w
   2. **Locks the PRES ticket to its agreed week.** The week the ticket is currently scheduled
      to (auto or locked) is captured and pinned: NoMAD sets the PRES due date (Friday of that
      week) and marks it locked so its scheduled week can no longer drift.
-  3. **Creates the FST copy immediately** on the `FST` board (Full Screening Team) — copying
-     summary, description, assignee, Total Count, Screening Due date, priority, and labels.
+  3. **Creates the FST copy immediately** on the `FST` board (Jira project "Full Setup") as a
+     **"Screening and Validation"** issue (configurable via `FST_ISSUE_TYPE`) — copying summary,
+     description, assignee, Total Count, Screening Due date, priority, and labels.
   4. **Schedules the FST copy to the same agreed week** (sets its due date).
   5. **Links** the FST ticket to the PRES ticket, and stores the `FST-###` key on the schedule.
 - The approval succeeds as long as the transition works; any problem creating, scheduling, or
