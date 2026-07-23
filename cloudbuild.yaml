@@ -46,8 +46,16 @@ steps:
       - '0'
       - '--max-instances'
       - '3'
+      - '--timeout'
+      - '60'
+      - '--concurrency'
+      - '100'
+      # IMPORTANT: BASE_URL must be the public custom domain — it builds the OIDC redirect_uri
+      # that Okta validates. Using the raw run.app URL breaks login (400 invalid_request).
       - '--set-env-vars'
-      - 'BASE_URL=https://nomad-750886765018.europe-west1.run.app'
+      - 'BASE_URL=https://nomad.it.prewave.ai,OKTA_DOMAIN=prewave.okta.com'
+      - '--set-secrets'
+      - 'DATABASE_URL=nomad-database-url:latest,ATLASSIAN_OAUTH_CLIENT_ID=nomad-atlassian-oauth-client-id:latest,ATLASSIAN_OAUTH_CLIENT_SECRET=nomad-atlassian-oauth-client-secret:latest,OKTA_CLIENT_ID=nomad-okta-client-id:latest,OKTA_CLIENT_SECRET=nomad-okta-client-secret:latest'
       - '--add-cloudsql-instances'
       - '$PROJECT_ID:europe-west6:nomad-db'
 
