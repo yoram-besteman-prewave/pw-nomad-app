@@ -22,6 +22,12 @@ class JiraClient:
     # project has no "CS Request" type, so without this the copy would fall back to the
     # first available type (Epic), which is wrong. Configurable via env.
     FST_ISSUE_TYPE = os.getenv("FST_ISSUE_TYPE", "Screening and Validation")
+
+    # [DM] Request Type (customfield_13806) is required by a create validator on the FST
+    # "Screening and Validation" screen. Copied from the source ticket when present; this
+    # is the fallback option id ("Normal"; the other option is "EUDR" = 14575).
+    DM_REQUEST_TYPE_FIELD = "customfield_13806"
+    FST_DEFAULT_REQUEST_TYPE_ID = os.getenv("FST_DEFAULT_REQUEST_TYPE_ID", "14576")  # "Normal"
     
     # OAuth 2.0 credentials for NoMAD App service account
     # This will show as "NoMAD App" in Jira history
@@ -1127,6 +1133,15 @@ class JiraClient:
             # Copy labels if present
             if fields.get("labels"):
                 new_fields["labels"] = fields["labels"]
+            
+            # [DM] Request Type is required by a create validator on the FST screen. Copy the
+            # source value if set, otherwise default (Normal). Only meaningful if the field is
+            # on the target screen; the createmeta filter below will drop it if not.
+            source_request_type = fields.get(self.DM_REQUEST_TYPE_FIELD)
+            if isinstance(source_request_type, dict) and source_request_type.get("id"):
+                new_fields[self.DM_REQUEST_TYPE_FIELD] = {"id": source_request_type["id"]}
+            else:
+                new_fields[self.DM_REQUEST_TYPE_FIELD] = {"id": self.FST_DEFAULT_REQUEST_TYPE_ID}
             
             # Only send fields that the target issue type's create screen actually accepts.
             # Different FST issue types expose different fields (e.g. "Screening and Validation"
