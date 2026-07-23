@@ -825,70 +825,137 @@ class JiraClient:
             print(f"Error transitioning {ticket_key} to Jumped: {e}")
             return False
 
-    def transition_to_approved(self, ticket_key: str) -> dict:
-        """Transition a ticket to 'Approved' status. Returns dict with success and optional error.
+    def get_ticket_status(self, ticket_key: str) -> str:
+        """Return the current status name for a ticket (lightweight, status field only)."""
+        result = self._make_request("GET", f"issue/{ticket_key}", params={"fields": "status"})
+        status_obj = result.get("fields", {}).get("status", {})
+        if isinstance(status_obj, dict):
+            return status_obj.get("name", "Unknown")
+        return str(status_obj)
 
-        The PRES workflow's 'Approve' transition is conditional, which can cause Jira to hide it
-        from the NoMAD App service account.  We therefore try twice:
-          1. Normal call (only available transitions) — succeeds when the service account satisfies
-             the workflow condition.
-          2. Force fallback using includeUnavailableTransitions=true — surfaces the transition even
-             when the condition marks it unavailable, then attempts the POST directly.  If Jira
-             still rejects it (hard condition), we return a clear actionable error pointing to the
-             Jira workflow fix.
+    # Max number of workflow hops we will walk to reach 'Approved' (guards against loops / bad configs).
+    MAX_APPROVE_HOPS = 5
+    # Preferred intermediate transition/status names when several forward steps are possible.
+    APPROVE_PATH_HINTS = ("review", "in review", "screening", "in progress", "start", "submit")
+
+    def transition_to_approved(self, ticket_key: str) -> dict:
+        """Walk the workflow from the ticket's current status to the 'Approved' status.
+
+        The PRES workflow is multi-step (e.g. Pending -> Review -> Approved), so there is usually
+        no single transition that lands directly on 'Approved'.  We therefore walk the workflow
+        one hop at a time:
+          1. If a transition from the current status targets 'Approved', take it.
+          2. Otherwise take a single *forward* intermediate transition (a step that stays
+             In Progress and is not a rejection / done step) and repeat.
+        Each hop also retries with includeUnavailableTransitions=true when a transition is hidden
+        by a conditional workflow rule for the service account.
         """
+        target = self.APPROVED_STATUS.lower()
+
+        def _target_name(t: dict) -> str:
+            return t.get("to", {}).get("name", "").lower()
+
+        def _target_category(t: dict) -> str:
+            return t.get("to", {}).get("statusCategory", {}).get("key", "").lower()
+
         def _find_approved(transitions: list[dict]) -> dict | None:
             for t in transitions:
-                if t.get("name", "").lower() == self.APPROVED_STATUS.lower():
-                    return t
-                if t.get("to", {}).get("name", "").lower() == self.APPROVED_STATUS.lower():
+                if t.get("name", "").lower() == target or _target_name(t) == target:
                     return t
             return None
 
-        try:
-            # --- Attempt 1: normal (only transitions the service account can execute) ---
+        def _execute(transition: dict) -> None:
+            payload = {"transition": {"id": transition["id"]}}
+            self._make_request("POST", f"issue/{ticket_key}/transitions", json=payload)
+
+        def _get_transitions_with_fallback() -> list[dict]:
             transitions = self.get_transitions(ticket_key)
-            approved_transition = _find_approved(transitions)
+            if _find_approved(transitions):
+                return transitions
+            # Surface transitions hidden by conditional workflow rules for the service account.
+            return self.get_transitions(ticket_key, include_unavailable=True) or transitions
 
-            if approved_transition:
-                payload = {"transition": {"id": approved_transition["id"]}}
-                self._make_request("POST", f"issue/{ticket_key}/transitions", json=payload)
-                print(f"[NoMAD] Transitioned {ticket_key} to Approved status")
-                return {"success": True}
+        try:
+            visited_statuses: set[str] = set()
 
-            available_names = [t.get("name", "Unknown") for t in transitions]
-            print(f"[NoMAD] {ticket_key}: 'Approved' not in available transitions {available_names}. "
-                  f"Retrying with includeUnavailableTransitions...")
+            for hop in range(self.MAX_APPROVE_HOPS):
+                current = self.get_ticket_status(ticket_key)
+                current_lower = (current or "").lower()
 
-            # --- Attempt 2: force fallback ---
-            all_transitions = self.get_transitions(ticket_key, include_unavailable=True)
-            approved_transition = _find_approved(all_transitions)
+                if current_lower == target:
+                    print(f"[NoMAD] {ticket_key} already in Approved status")
+                    return {"success": True}
 
-            if not approved_transition:
-                all_names = [t.get("name", "Unknown") for t in all_transitions]
-                error_msg = (
-                    f"No 'Approved' transition found for {ticket_key} even with includeUnavailableTransitions. "
-                    f"All transitions: {all_names}. Check that the PRES workflow has a transition leading to "
-                    f"'Approved' status."
-                )
-                print(f"[NoMAD] {ticket_key}: {error_msg}")
-                return {"success": False, "error": error_msg}
+                if current_lower in visited_statuses:
+                    return {"success": False, "error": (
+                        f"Approval walk for {ticket_key} looped back to status '{current}'. "
+                        f"Cannot reach '{self.APPROVED_STATUS}' automatically — check the PRES workflow."
+                    )}
+                visited_statuses.add(current_lower)
 
-            try:
-                payload = {"transition": {"id": approved_transition["id"]}}
-                self._make_request("POST", f"issue/{ticket_key}/transitions", json=payload)
-                print(f"[NoMAD] Transitioned {ticket_key} to Approved status (via force fallback)")
-                return {"success": True}
-            except Exception as post_err:
-                error_msg = (
-                    f"Failed to approve {ticket_key}: the 'Approve' transition exists but is blocked "
-                    f"by a Jira workflow condition for the NoMAD App service account. "
-                    f"A Jira admin must open PRES project settings -> Workflows -> edit the workflow -> "
-                    f"'Approve' transition -> Conditions, and allow the NoMAD App principal. "
-                    f"(Raw error: {post_err})"
-                )
-                print(f"[NoMAD] {ticket_key}: {error_msg}")
-                return {"success": False, "error": error_msg}
+                transitions = _get_transitions_with_fallback()
+
+                # 1) Direct transition to Approved wins.
+                approved_transition = _find_approved(transitions)
+                if approved_transition:
+                    try:
+                        _execute(approved_transition)
+                        print(f"[NoMAD] Transitioned {ticket_key} to Approved status (from '{current}')")
+                        return {"success": True}
+                    except Exception as post_err:
+                        error_msg = (
+                            f"Failed to approve {ticket_key}: the 'Approve' transition exists but is blocked "
+                            f"by a Jira workflow condition for the NoMAD App service account. "
+                            f"A Jira admin must open PRES project settings -> Workflows -> edit the workflow -> "
+                            f"'Approve' transition -> Conditions, and allow the NoMAD App principal. "
+                            f"(Raw error: {post_err})"
+                        )
+                        print(f"[NoMAD] {ticket_key}: {error_msg}")
+                        return {"success": False, "error": error_msg}
+
+                # 2) Otherwise pick a single forward intermediate step (stay In Progress,
+                #    never a done/rejected/backwards status).
+                candidates = [
+                    t for t in transitions
+                    if _target_category(t) == "indeterminate"
+                    and _target_name(t) not in visited_statuses
+                    and "reject" not in t.get("name", "").lower()
+                ]
+
+                if not candidates:
+                    all_names = [f"{t.get('name')}→{t.get('to', {}).get('name')}" for t in transitions]
+                    return {"success": False, "error": (
+                        f"No transition toward '{self.APPROVED_STATUS}' found for {ticket_key} "
+                        f"from status '{current}'. Available transitions: {all_names}. "
+                        f"Check that the PRES workflow has a path leading to '{self.APPROVED_STATUS}'."
+                    )}
+
+                # Prefer a hinted transition when there is more than one forward option.
+                if len(candidates) > 1:
+                    hinted = [
+                        t for t in candidates
+                        if any(h in t.get("name", "").lower() or h in _target_name(t) for h in self.APPROVE_PATH_HINTS)
+                    ]
+                    if len(hinted) == 1:
+                        candidates = hinted
+                    elif len(hinted) > 1:
+                        candidates = hinted[:1]  # deterministic: first hinted match
+                    else:
+                        all_names = [f"{t.get('name')}→{t.get('to', {}).get('name')}" for t in candidates]
+                        return {"success": False, "error": (
+                            f"Ambiguous approval path for {ticket_key} from status '{current}': "
+                            f"multiple forward transitions {all_names}. Cannot decide automatically."
+                        )}
+
+                step = candidates[0]
+                _execute(step)
+                print(f"[NoMAD] {ticket_key}: advanced '{current}' → '{step.get('to', {}).get('name')}' "
+                      f"toward Approved (hop {hop + 1})")
+
+            return {"success": False, "error": (
+                f"Gave up approving {ticket_key} after {self.MAX_APPROVE_HOPS} workflow hops without "
+                f"reaching '{self.APPROVED_STATUS}'. Check the PRES workflow for an unexpectedly long path."
+            )}
 
         except Exception as e:
             print(f"Error transitioning {ticket_key} to Approved: {e}")
