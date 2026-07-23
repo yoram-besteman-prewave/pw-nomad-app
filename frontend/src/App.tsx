@@ -36,11 +36,11 @@ import { Toast } from './components/Toast';
 import { AdminPortal } from './components/AdminPortal';
 import { ECPanel } from './components/ECPanel';
 import { ExpiredTicketsDialog } from './components/ExpiredTicketsDialog';
-import type { Ticket } from './types/ticket';
+import type { Ticket, WeekHeader } from './types/ticket';
 
 // App version - keep in sync with backend
 const APP_VERSION = 'v0.2.0';
-import { getTicketSize, isSchedulable, getScheduleBlockReason, getScheduledBySize, canScheduleTicket, getCurrentWeekAndYear } from './types/ticket';
+import { getTicketSize, isSchedulable, getScheduleBlockReason, getScheduledBySize, canScheduleTicket, getCurrentWeekAndYear, getMondayOfWeek } from './types/ticket';
 
 type BoardData = ReturnType<typeof useJiraTickets>;
 type BoardTab = 'screening' | 'tiern';
@@ -1213,6 +1213,63 @@ function AuthenticatedApp({
     return map;
   }, [enrichedQueue]);
 
+  // Per-week swimlane header data: actual date range + capacity usage.
+  // Keyed by `${year}-${week}` (unpadded). Usage = sum of scheduled lines whose
+  // effective (delivery) week lands in that lane, vs the week's total capacity.
+  const weekHeaders = useMemo(() => {
+    const map = new Map<string, WeekHeader>();
+    const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+    for (const t of enrichedQueue) {
+      const week = (t as any).effectiveWeek as number | undefined;
+      const year = (t as any).effectiveYear as number | undefined;
+      if (week == null || year == null) continue;
+
+      const key = `${year}-${week}`;
+      let header = map.get(key);
+      if (!header) {
+        header = {
+          week,
+          year,
+          label: `W${week}`,
+          dateRange: `${fmt(getMondayOfWeek(week, year))} – ${fmt(getFridayOfWeek(week, year))}`,
+          used: 0,
+          capacity: getWeekCapacity(week, year),
+          isOver: false,
+        };
+        map.set(key, header);
+      }
+      header.used += t.lines || 0;
+    }
+
+    map.forEach(header => { header.isOver = header.used > header.capacity; });
+    return map;
+  }, [enrichedQueue, getWeekCapacity]);
+
+  // Warn (once) when a reshuffle pushes a week lane over capacity.
+  // Only fires for weeks that newly transition into an over-capacity state,
+  // so it doesn't nag on initial load or on unrelated changes.
+  const overCapacityWeeksRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const currentOver = new Set<string>();
+    weekHeaders.forEach((header, key) => { if (header.isOver) currentOver.add(key); });
+
+    const prev = overCapacityWeeksRef.current;
+    overCapacityWeeksRef.current = currentOver;
+    if (prev === null) return; // Skip the initial computation
+
+    for (const key of currentOver) {
+      if (!prev.has(key)) {
+        const header = weekHeaders.get(key)!;
+        showToast(
+          `${header.label} (${header.dateRange}) is over capacity — ${header.used.toLocaleString()}/${header.capacity.toLocaleString()} lines. Can't schedule more here.`,
+          'warning'
+        );
+        break; // One toast is enough per change
+      }
+    }
+  }, [weekHeaders, showToast]);
+
   // Filter function for search
   const matchesSearch = useCallback((ticket: Ticket) => {
     if (!debouncedSearch) return true;
@@ -2362,6 +2419,9 @@ function AuthenticatedApp({
                           })();
                         }}
                       showWeekLabel={ticket._showWeekLabel}
+                      weekHeader={ticket._showWeekLabel
+                        ? weekHeaders.get(`${(ticket as any).effectiveYear}-${(ticket as any).effectiveWeek}`)
+                        : undefined}
                       dueDateUpdating={dueDateUpdatingTicket === ticket.key}
                     />
                     </div>

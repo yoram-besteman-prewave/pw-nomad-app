@@ -288,6 +288,17 @@ export interface WeekUnlocks {
   medium: boolean;
 }
 
+// Header data for a week swimlane in the queue: date range + capacity usage
+export interface WeekHeader {
+  week: number;
+  year: number;
+  label: string;      // e.g. "W31"
+  dateRange: string;  // e.g. "Jul 28 – Aug 1"
+  used: number;       // total scheduled lines in this week's lane
+  capacity: number;   // total capacity for the week
+  isOver: boolean;    // used > capacity
+}
+
 // Capacity breakdown by ticket size
 export interface CapacityBySize {
   small: { used: number; reserved: number; available: number };

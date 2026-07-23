@@ -1,7 +1,7 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useState, useEffect, useMemo } from 'react';
-import type { Ticket } from '../types/ticket';
+import type { Ticket, WeekHeader } from '../types/ticket';
 import { getTicketSize, isSchedulable, getTicketState, isApproachingDeadline, getWorkingDaysUntilDue, getCurrentWeekAndYear } from '../types/ticket';
 
 interface QueueItemProps {
@@ -18,6 +18,7 @@ interface QueueItemProps {
   onMoveToBacklog?: () => void;
   onPositionChange?: (newPosition: number) => void;
   showWeekLabel?: string;
+  weekHeader?: WeekHeader;
   maxLines?: number;
   dueDateUpdating?: boolean;
 }
@@ -36,6 +37,7 @@ export function QueueItem({
   onMoveToBacklog,
   onPositionChange,
   showWeekLabel, 
+  weekHeader,
   maxLines = 4000,
   dueDateUpdating = false
 }: QueueItemProps) {
@@ -201,9 +203,51 @@ export function QueueItem({
 
   return (
     <>
-      {showWeekLabel && (
+      {weekHeader ? (
+        (() => {
+          const capPercent = weekHeader.capacity > 0
+            ? (weekHeader.used / weekHeader.capacity) * 100
+            : 0;
+          const barColor = weekHeader.isOver
+            ? 'bg-red-500'
+            : capPercent >= 90
+            ? 'bg-amber-500'
+            : 'bg-emerald-500';
+          return (
+            <div className="flex items-center gap-2 mb-1 mt-3">
+              {/* Week label + actual date range */}
+              <span className={`week-divider inline-flex items-baseline gap-1.5 flex-shrink-0 ${weekHeader.isOver ? '!bg-red-600' : ''}`}>
+                <span>{weekHeader.label}</span>
+                <span className="font-normal opacity-70">{weekHeader.dateRange}</span>
+              </span>
+
+              {/* Capacity meter for the swimlane */}
+              <div className="flex items-center gap-1.5 min-w-0 max-w-[280px] flex-1">
+                <div className="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${barColor}`}
+                    style={{ width: `${Math.min(100, capPercent)}%` }}
+                  />
+                </div>
+                <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap ${weekHeader.isOver ? 'text-red-600 font-semibold' : 'text-gray-500'}`}>
+                  {weekHeader.used.toLocaleString()}/{weekHeader.capacity.toLocaleString()}
+                </span>
+                {weekHeader.isOver ? (
+                  <span className="text-[9px] font-semibold text-red-600 whitespace-nowrap">
+                    +{(weekHeader.used - weekHeader.capacity).toLocaleString()} over
+                  </span>
+                ) : (
+                  <span className="text-[9px] text-gray-400 whitespace-nowrap">
+                    {(weekHeader.capacity - weekHeader.used).toLocaleString()} free
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })()
+      ) : showWeekLabel ? (
         <div className="week-divider inline-block mb-1 mt-3">{showWeekLabel}</div>
-      )}
+      ) : null}
       
       {/* Mismatch warning - compact inline with ticket key */}
       
