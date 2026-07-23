@@ -1860,13 +1860,23 @@ function AuthenticatedApp({
       });
       
       if (response.ok) {
-        const data = await response.json().catch(() => ({} as { fst_key?: string; fst_warning?: string }));
+        const data = await response.json().catch(() => ({} as {
+          fst_key?: string; fst_warning?: string; locked_week?: number; locked_year?: number;
+        }));
         console.log(`[EC] Approved ${ticketKey}`, data);
         
-        // Update the ticket in queue to mark as approved (and record the FST key)
+        // Update the ticket in queue: mark approved, record the FST key, and pin it
+        // to the agreed (locked) week so the board reflects the lock immediately.
         setQueueTickets(prev => prev.map(t =>
           t.key === ticketKey
-            ? { ...t, is_approved: true, status: 'Approved', fst_key: data.fst_key ?? t.fst_key }
+            ? {
+                ...t,
+                is_approved: true,
+                status: 'Approved',
+                fst_key: data.fst_key ?? t.fst_key,
+                locked_week: data.locked_week ?? t.locked_week,
+                locked_year: data.locked_year ?? t.locked_year,
+              }
             : t
         ));
         

@@ -1151,11 +1151,17 @@ class JiraClient:
         scheduling, or linking the FST ticket are surfaced via 'fst_warning' but do
         not fail the approval.
 
+        When a week/year is provided, the PRES ticket is also locked to that
+        (delivery) week — its due date is set and 'locked_week'/'locked_year' are
+        returned so the caller can pin it in NoMAD, keeping PRES and FST in sync.
+
         Returns: {"success": bool, "fst_key": str|None, "error": str|None,
-                  "fst_warning": str|None, "scheduled": bool}
+                  "fst_warning": str|None, "scheduled": bool,
+                  "locked_week": int|None, "locked_year": int|None}
         """
         result = {"success": False, "fst_key": None, "error": None,
-                  "fst_warning": None, "scheduled": False}
+                  "fst_warning": None, "scheduled": False,
+                  "locked_week": None, "locked_year": None}
 
         # Step 1: Transition PRES ticket to Approved (core action).
         approve_result = self.transition_to_approved(ticket_key)
@@ -1164,7 +1170,25 @@ class JiraClient:
             return result
         result["success"] = True
 
-        # Step 2: Create the FST copy.
+        warnings: list[str] = []
+
+        # Step 2: Lock the PRES ticket to the agreed week (sets its due date). This
+        # pins the ticket so its scheduled week can't drift away from the FST copy.
+        if week is not None and year is not None:
+            try:
+                ok_pres, final_week, final_year = self.update_due_date(
+                    ticket_key, int(week), int(year), lines=lines, weekly_capacity=weekly_capacity
+                )
+                if ok_pres:
+                    result["locked_week"] = final_week
+                    result["locked_year"] = final_year
+                else:
+                    warnings.append(f"locking {ticket_key} to its agreed week failed")
+            except Exception as e:
+                print(f"[NoMAD] Error locking PRES {ticket_key} to its week: {e}")
+                warnings.append(f"locking {ticket_key} to its agreed week failed ({e})")
+
+        # Step 3: Create the FST copy.
         try:
             fst_key = self.create_fst_ticket(ticket_key)
         except Exception as e:
@@ -1172,30 +1196,30 @@ class JiraClient:
             print(f"[NoMAD] Exception creating FST ticket for {ticket_key}: {e}")
 
         if not fst_key:
-            result["fst_warning"] = (
+            fst_msg = (
                 f"{ticket_key} was approved, but creating the FST ticket failed. "
                 f"No FST ticket or link was created."
             )
-            print(f"[NoMAD] {result['fst_warning']}")
+            warnings.append("creating the FST ticket failed")
+            result["fst_warning"] = fst_msg
+            print(f"[NoMAD] {fst_msg}")
             return result
         result["fst_key"] = fst_key
 
-        warnings: list[str] = []
-
-        # Step 3: Schedule the FST copy to the agreed week.
+        # Step 4: Schedule the FST copy to the same agreed week.
         if week is not None and year is not None:
             try:
-                ok, final_week, final_year = self.update_due_date(
+                ok_fst, _, _ = self.update_due_date(
                     fst_key, int(week), int(year), lines=lines, weekly_capacity=weekly_capacity
                 )
-                result["scheduled"] = ok
-                if not ok:
+                result["scheduled"] = ok_fst
+                if not ok_fst:
                     warnings.append(f"scheduling FST ticket {fst_key} to W{week}/{year} failed")
             except Exception as e:
                 print(f"[NoMAD] Error scheduling FST {fst_key}: {e}")
                 warnings.append(f"scheduling FST ticket {fst_key} failed ({e})")
 
-        # Step 4: Link FST <-> PRES.
+        # Step 5: Link FST <-> PRES.
         try:
             if not self.link_tickets(fst_key, ticket_key):
                 warnings.append(f"linking FST ticket {fst_key} to {ticket_key} failed")
@@ -1204,10 +1228,14 @@ class JiraClient:
             warnings.append(f"linking FST ticket {fst_key} failed ({e})")
 
         if warnings:
-            result["fst_warning"] = f"FST ticket {fst_key} was created, but " + "; ".join(warnings) + "."
+            result["fst_warning"] = (
+                f"{ticket_key} was approved and FST ticket {fst_key} was created, but "
+                + "; ".join(warnings) + "."
+            )
 
         print(f"[NoMAD] Approved {ticket_key} -> FST {fst_key} "
-              f"(scheduled={result['scheduled']}, warnings={len(warnings)})")
+              f"(locked=W{result['locked_week']}/{result['locked_year']}, "
+              f"scheduled={result['scheduled']}, warnings={len(warnings)})")
         return result
 
     def process_jumped_ticket(self, ticket_key: str) -> dict:

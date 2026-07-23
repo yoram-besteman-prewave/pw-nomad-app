@@ -1333,23 +1333,30 @@ async def approve_ticket(request: Request):
         if result.get("success"):
             fst_key = result.get("fst_key")
             fst_warning = result.get("fst_warning")
+            # Lock the PRES ticket to the agreed (delivery) week so it can't drift
+            # away from the FST copy. Fall back to the requested week if the backend
+            # couldn't compute the final week.
+            locked_week = result.get("locked_week") if result.get("locked_week") is not None else agreed_week
+            locked_year = result.get("locked_year") if result.get("locked_year") is not None else agreed_year
             
-            # Persist the FST key on the ticket's schedule so the board and the later
-            # jump step know the ticket has already been handed off to FST.
-            if fst_key:
-                if ticket_key in ticket_schedules:
-                    ticket_schedules[ticket_key]["fst_key"] = fst_key
-                else:
-                    ticket_schedules[ticket_key] = {
-                        "priority_order": 0,
-                        "in_queue": True,
-                        "locked_week": agreed_week,
-                        "locked_year": agreed_year,
-                        "fst_key": fst_key,
-                    }
+            # Persist the FST key + lock on the ticket's schedule so the board and the
+            # later jump step know the ticket has been handed off and pinned.
+            if fst_key or locked_week is not None:
+                sched = ticket_schedules.get(ticket_key) or {
+                    "priority_order": 0,
+                    "in_queue": True,
+                    "locked_week": None,
+                    "locked_year": None,
+                }
+                if fst_key:
+                    sched["fst_key"] = fst_key
+                if locked_week is not None:
+                    sched["locked_week"] = locked_week
+                    sched["locked_year"] = locked_year
+                ticket_schedules[ticket_key] = sched
                 await db.save_ticket_schedules([{
                     "key": ticket_key,
-                    **ticket_schedules[ticket_key],
+                    **sched,
                 }])
             
             # Log the approval action
@@ -1358,15 +1365,20 @@ async def approve_ticket(request: Request):
                 "ticket_summary": ticket.summary,
                 "ticket_lines": ticket.lines,
                 "fst_key": fst_key,
+                "locked_week": locked_week,
+                "locked_year": locked_year,
             }, ip, user_agent)
             
             # Broadcast to all clients that a ticket was approved
             await broadcast_data_update("ticket_approved", user.email, {
                 "ticket_key": ticket_key,
                 "fst_key": fst_key,
+                "locked_week": locked_week,
+                "locked_year": locked_year,
             })
             
-            print(f"[EC] Ticket {ticket_key} approved by {user.email} -> FST {fst_key}")
+            print(f"[EC] Ticket {ticket_key} approved by {user.email} -> FST {fst_key} "
+                  f"(locked W{locked_week}/{locked_year})")
             message = f"Ticket {ticket_key} has been approved"
             if fst_key:
                 message += f" and handed off to {fst_key}"
@@ -1375,6 +1387,8 @@ async def approve_ticket(request: Request):
                 "ticket_key": ticket_key,
                 "fst_key": fst_key,
                 "fst_warning": fst_warning,
+                "locked_week": locked_week,
+                "locked_year": locked_year,
                 "message": message,
             }
         else:

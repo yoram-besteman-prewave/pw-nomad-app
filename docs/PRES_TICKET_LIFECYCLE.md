@@ -66,15 +66,27 @@ When a ticket is scheduled, NoMAD sets the **due date = Friday of the assigned w
 
 ---
 
-## Step 3 — DM approves
+## Step 3 — DM approves (this is where the FST ticket is created)
 
 - Approval is done in NoMAD via the **approval panel** ("Eszter's Space"), which calls
   `POST /api/tickets/approve`. This endpoint is **admin-only** (`require_admin`), so DM
   approvers need the NoMAD admin role.
 - **Eligibility checks** before approval: ticket must have Total Count, must not already be
   Approved, and must not already be Jumped.
-- On approve, NoMAD transitions the PRES issue to the **`Approved`** status using the NoMAD
-  service account. The action is logged and broadcast to other connected users in real time.
+- The approval workflow (`process_approved_ticket`) does the following:
+  1. **Transitions the PRES issue to `Approved`.** The PRES workflow is multi-step
+     (`Pending → Review → Approved`); NoMAD walks it forward one safe hop at a time until it
+     reaches `Approved`.
+  2. **Locks the PRES ticket to its agreed week.** The week the ticket is currently scheduled
+     to (auto or locked) is captured and pinned: NoMAD sets the PRES due date (Friday of that
+     week) and marks it locked so its scheduled week can no longer drift.
+  3. **Creates the FST copy immediately** on the `FST` board (Full Screening Team) — copying
+     summary, description, assignee, Total Count, Screening Due date, priority, and labels.
+  4. **Schedules the FST copy to the same agreed week** (sets its due date).
+  5. **Links** the FST ticket to the PRES ticket, and stores the `FST-###` key on the schedule.
+- The approval succeeds as long as the transition works; any problem creating, scheduling, or
+  linking the FST ticket is surfaced as a non-fatal warning toast (the ticket is still Approved).
+- The action is logged and broadcast to other connected users in real time.
 
 **Workflow caveat (Jira admins):** the PRES "Approve" transition is conditional. NoMAD first
 tries the normal transition, then retries with `includeUnavailableTransitions`. If a hard
@@ -86,7 +98,10 @@ admin to allow the "NoMAD App" principal on the Approve transition
 
 ## Step 4 — What happens once Approved
 
-1. The ticket turns **green (Ready)** in NoMAD.
+At this point the FST ticket **already exists** (created during approval, above) and both the
+PRES ticket and its FST copy are scheduled to the same, now-locked week.
+
+1. The ticket turns **green (Ready)** in NoMAD and shows a link to its `FST-###` counterpart.
 2. If it's Approved **and** its due date is within ~10 working days, it shows a
    **"Ready to jump"** banner.
 3. **Handoff ("Jump")** happens when the ticket's scheduled week begins:
@@ -94,15 +109,13 @@ admin to allow the "NoMAD App" principal on the Approve transition
      tickets in the current week.
    - Manually: a planner can drop an approved ticket onto the current week to trigger an
      immediate jump.
-4. The Jump workflow (`process_jumped_ticket`) does three things:
-   1. **Creates a copy on the `FST` board** (Full Screening Team) — copying summary,
-      description, assignee, due date, Total Count, Screening Due date, priority, and labels.
-   2. **Links** the FST ticket back to the PRES ticket.
-   3. **Transitions the PRES ticket to `Jumped`** (terminal in NoMAD).
+4. The Jump workflow (`process_jumped_ticket`) now only **transitions the PRES ticket to
+   `Jumped`** (terminal in NoMAD). It does **not** create the FST ticket — that already happened
+   at approval. It looks up the existing FST link for reporting.
    - The PRES ticket then shows a "Jumped" badge with a link to its `FST-###` counterpart.
 
-> Only **Approved** tickets can be jumped/handed off. An unapproved ticket will never create an
-> FST ticket.
+> Only **Approved** tickets have FST copies. An unapproved ticket never creates an FST ticket.
+> The FST ticket is created at **approval** time, not at jump time.
 
 ---
 
@@ -122,9 +135,10 @@ admin to allow the "NoMAD App" principal on the Approve transition
 
 ## Status glossary
 - **(open / initial)** — newly created by CS; schedulable once Total Count is present.
-- **Approved** (`APPROVED_STATUS`) — DM has approved; eligible to jump. Required for
-  current-week scheduling.
-- **Jumped** (`JUMPED_STATUS`) — handed off; FST copy exists; terminal in NoMAD.
+- **Approved** (`APPROVED_STATUS`) — DM has approved; the FST copy has been created, linked, and
+  scheduled, and the PRES ticket is locked to its agreed week. Eligible to jump.
+- **Jumped** (`JUMPED_STATUS`) — handed off (week started); terminal in NoMAD. The FST copy was
+  already created at approval.
 - **Completed statuses** (no expiry alerts): `Jumped`, `Done`, `Closed`, `Completed`, `Resolved`.
 - NoMAD ignores anything already `Done` (JQL excludes it).
 
@@ -141,9 +155,10 @@ flowchart TD
     E -->|Not yet| F["Pending approval (orange)<br/>red/urgent if week < 10 working days"]
     F -->|Week starts, still unapproved| G["Auto-moved to next<br/>available slot (warning)"]
     G --> E
-    E -->|Approved| H["Ready (green)<br/>PRES status = Approved"]
-    H --> I{Scheduled week started?}
-    I -->|Yes auto, or manual drop on current week| J["JUMP:<br/>1. Create FST copy<br/>2. Link FST to PRES<br/>3. PRES to Jumped"]
+    E -->|Approved| H["APPROVE:<br/>1. PRES to Approved (Pending→Review→Approved)<br/>2. Lock PRES to agreed week<br/>3. Create FST copy<br/>4. Schedule FST to agreed week<br/>5. Link FST to PRES"]
+    H --> H2["Ready (green)<br/>PRES = Approved, FST-### exists & linked"]
+    H2 --> I{Scheduled week started?}
+    I -->|Yes auto, or manual drop on current week| J["JUMP:<br/>PRES to Jumped<br/>(FST already exists)"]
     J --> K["Handoff complete<br/>FST team screens the list"]
 ```
 
