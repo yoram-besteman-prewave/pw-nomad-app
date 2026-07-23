@@ -1115,42 +1115,126 @@ class JiraClient:
         self.get_available_link_types()
         return False
 
+    def find_linked_fst_key(self, ticket_key: str) -> Optional[str]:
+        """Return the key of an FST ticket linked to this PRES ticket, if any."""
+        try:
+            result = self._make_request("GET", f"issue/{ticket_key}", params={"fields": "issuelinks"})
+            links = result.get("fields", {}).get("issuelinks", []) or []
+            for link in links:
+                for side in ("outwardIssue", "inwardIssue"):
+                    linked = link.get(side)
+                    if linked and str(linked.get("key", "")).upper().startswith(f"{self.FST_PROJECT_KEY}-"):
+                        return linked["key"]
+            return None
+        except Exception as e:
+            print(f"[NoMAD] Error finding linked FST key for {ticket_key}: {e}")
+            return None
+
+    def process_approved_ticket(
+        self,
+        ticket_key: str,
+        week: Optional[int] = None,
+        year: Optional[int] = None,
+        lines: int = 0,
+        weekly_capacity: int = 4000,
+    ) -> dict:
+        """
+        Full "Approve" workflow. The FST ticket is now created at approval time
+        (previously it was created later, at jump time):
+          1. Transition the PRES ticket to 'Approved' (the core action).
+          2. Create a copy of the ticket on the FST board.
+          3. Schedule the FST copy to the agreed week (sets its due date), when a
+             week/year is provided.
+          4. Link the FST ticket back to the PRES ticket.
+
+        The approval itself succeeds as long as step 1 works; problems creating,
+        scheduling, or linking the FST ticket are surfaced via 'fst_warning' but do
+        not fail the approval.
+
+        Returns: {"success": bool, "fst_key": str|None, "error": str|None,
+                  "fst_warning": str|None, "scheduled": bool}
+        """
+        result = {"success": False, "fst_key": None, "error": None,
+                  "fst_warning": None, "scheduled": False}
+
+        # Step 1: Transition PRES ticket to Approved (core action).
+        approve_result = self.transition_to_approved(ticket_key)
+        if not approve_result.get("success"):
+            result["error"] = approve_result.get("error", "Failed to transition to Approved")
+            return result
+        result["success"] = True
+
+        # Step 2: Create the FST copy.
+        try:
+            fst_key = self.create_fst_ticket(ticket_key)
+        except Exception as e:
+            fst_key = None
+            print(f"[NoMAD] Exception creating FST ticket for {ticket_key}: {e}")
+
+        if not fst_key:
+            result["fst_warning"] = (
+                f"{ticket_key} was approved, but creating the FST ticket failed. "
+                f"No FST ticket or link was created."
+            )
+            print(f"[NoMAD] {result['fst_warning']}")
+            return result
+        result["fst_key"] = fst_key
+
+        warnings: list[str] = []
+
+        # Step 3: Schedule the FST copy to the agreed week.
+        if week is not None and year is not None:
+            try:
+                ok, final_week, final_year = self.update_due_date(
+                    fst_key, int(week), int(year), lines=lines, weekly_capacity=weekly_capacity
+                )
+                result["scheduled"] = ok
+                if not ok:
+                    warnings.append(f"scheduling FST ticket {fst_key} to W{week}/{year} failed")
+            except Exception as e:
+                print(f"[NoMAD] Error scheduling FST {fst_key}: {e}")
+                warnings.append(f"scheduling FST ticket {fst_key} failed ({e})")
+
+        # Step 4: Link FST <-> PRES.
+        try:
+            if not self.link_tickets(fst_key, ticket_key):
+                warnings.append(f"linking FST ticket {fst_key} to {ticket_key} failed")
+        except Exception as e:
+            print(f"[NoMAD] Error linking {fst_key} <-> {ticket_key}: {e}")
+            warnings.append(f"linking FST ticket {fst_key} failed ({e})")
+
+        if warnings:
+            result["fst_warning"] = f"FST ticket {fst_key} was created, but " + "; ".join(warnings) + "."
+
+        print(f"[NoMAD] Approved {ticket_key} -> FST {fst_key} "
+              f"(scheduled={result['scheduled']}, warnings={len(warnings)})")
+        return result
+
     def process_jumped_ticket(self, ticket_key: str) -> dict:
         """
-        Full "Jump" workflow for an approved ticket whose week has started:
-        1. Transition PRES ticket to "Jumped" status
-        2. Create a copy on FST board
-        3. Link the FST ticket back to the PRES ticket
-        
+        "Jump" workflow for an approved ticket whose week has started.
+
+        The FST ticket is now created at approval time, so jumping only transitions
+        the PRES ticket to 'Jumped'. Returns the existing linked FST key (looked up
+        from the PRES ticket's issue links) for reporting.
+
         Returns: {"success": bool, "fst_key": str|None, "error": str|None}
         """
         result = {"success": False, "fst_key": None, "error": None}
-        
+
         try:
-            # Step 1: Create FST copy first (before transition, in case it fails)
-            fst_key = self.create_fst_ticket(ticket_key)
-            if not fst_key:
-                result["error"] = "Failed to create FST ticket"
-                return result
-            
-            result["fst_key"] = fst_key
-            
-            # Step 2: Link the tickets (FST relates to PRES)
-            link_success = self.link_tickets(fst_key, ticket_key)  # Will try multiple link types
-            if not link_success:
-                print(f"[NoMAD] Warning: Failed to link {fst_key} to {ticket_key}, continuing...")
-            
-            # Step 3: Transition PRES ticket to Jumped
+            # FST ticket already exists (created at approval); look up the link for reporting.
+            result["fst_key"] = self.find_linked_fst_key(ticket_key)
+
             transition_success = self.transition_to_jumped(ticket_key)
             if not transition_success:
-                result["error"] = "FST ticket created but failed to transition PRES to Jumped"
-                # Don't return failure - FST ticket was created successfully
-                print(f"[NoMAD] Warning: Could not transition {ticket_key} to Jumped")
-            
+                result["error"] = "Failed to transition PRES ticket to Jumped"
+                return result
+
             result["success"] = True
-            print(f"[NoMAD] Successfully jumped {ticket_key} -> {fst_key}")
+            print(f"[NoMAD] Jumped {ticket_key} (linked FST: {result['fst_key']})")
             return result
-            
+
         except Exception as e:
             result["error"] = str(e)
             print(f"Error in jump workflow for {ticket_key}: {e}")

@@ -1839,27 +1839,44 @@ function AuthenticatedApp({
     setIsSaving(false);
   };
 
-  // Approve a ticket (EC Panel) - transitions to 'Approved' status in Jira
+  // Approve a ticket (EC Panel) - transitions to 'Approved' status in Jira,
+  // creates the FST ticket, schedules it to the agreed week, and links them.
   const handleApproveTicket = async (ticketKey: string): Promise<boolean> => {
     try {
+      // Capture the ticket's currently-scheduled ("agreed") start week so the
+      // backend can create + schedule the FST ticket to it. Optional.
+      const placement = queueScheduleByKey.get(ticketKey);
+      const body: Record<string, unknown> = { ticket_key: ticketKey };
+      if (placement) {
+        body.week = placement.startWeek;
+        body.year = placement.startYear;
+      }
+
       const response = await fetch('/api/tickets/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ ticket_key: ticketKey }),
+        body: JSON.stringify(body),
       });
       
       if (response.ok) {
-        console.log(`[EC] Approved ${ticketKey}`);
+        const data = await response.json().catch(() => ({} as { fst_key?: string; fst_warning?: string }));
+        console.log(`[EC] Approved ${ticketKey}`, data);
         
-        // Update the ticket in queue to mark as approved
+        // Update the ticket in queue to mark as approved (and record the FST key)
         setQueueTickets(prev => prev.map(t =>
           t.key === ticketKey
-            ? { ...t, is_approved: true, status: 'Approved' }
+            ? { ...t, is_approved: true, status: 'Approved', fst_key: data.fst_key ?? t.fst_key }
             : t
         ));
         
-        showToast(`${ticketKey} approved!`, 'info');
+        if (data.fst_warning) {
+          showToast(`${ticketKey} approved, but ${data.fst_warning}`, 'warning');
+        } else if (data.fst_key) {
+          showToast(`${ticketKey} approved → FST ${data.fst_key} created`, 'info');
+        } else {
+          showToast(`${ticketKey} approved!`, 'info');
+        }
         return true;
       } else {
         const errorData = await response.json().catch(() => ({}));

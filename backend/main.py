@@ -1294,6 +1294,10 @@ async def approve_ticket(request: Request):
     ip, user_agent = get_client_info(request)
     body = await request.json()
     ticket_key = body.get("ticket_key")
+    # Agreed (scheduled) start week for the ticket, sent by the frontend so the FST
+    # ticket can be created and scheduled to it at approval time. Optional.
+    agreed_week = body.get("week")
+    agreed_year = body.get("year")
     
     if not ticket_key:
         raise HTTPException(status_code=400, detail="ticket_key is required")
@@ -1316,27 +1320,62 @@ async def approve_ticket(request: Request):
         if ticket.is_jumped:
             raise HTTPException(status_code=400, detail=f"Ticket {ticket_key} has already been handed off")
         
-        # Execute the transition to Approved
-        result = client.transition_to_approved(ticket_key)
+        # Approve: transition to Approved, create the FST ticket, schedule it to the
+        # agreed week, and link FST <-> PRES.
+        result = client.process_approved_ticket(
+            ticket_key,
+            week=agreed_week,
+            year=agreed_year,
+            lines=ticket.lines,
+            weekly_capacity=DEFAULT_WEEKLY_CAPACITY,
+        )
         
         if result.get("success"):
+            fst_key = result.get("fst_key")
+            fst_warning = result.get("fst_warning")
+            
+            # Persist the FST key on the ticket's schedule so the board and the later
+            # jump step know the ticket has already been handed off to FST.
+            if fst_key:
+                if ticket_key in ticket_schedules:
+                    ticket_schedules[ticket_key]["fst_key"] = fst_key
+                else:
+                    ticket_schedules[ticket_key] = {
+                        "priority_order": 0,
+                        "in_queue": True,
+                        "locked_week": agreed_week,
+                        "locked_year": agreed_year,
+                        "fst_key": fst_key,
+                    }
+                await db.save_ticket_schedules([{
+                    "key": ticket_key,
+                    **ticket_schedules[ticket_key],
+                }])
+            
             # Log the approval action
             await log_user_activity(user, "ticket_approved", {
                 "ticket_key": ticket_key,
                 "ticket_summary": ticket.summary,
                 "ticket_lines": ticket.lines,
+                "fst_key": fst_key,
             }, ip, user_agent)
             
             # Broadcast to all clients that a ticket was approved
             await broadcast_data_update("ticket_approved", user.email, {
                 "ticket_key": ticket_key,
+                "fst_key": fst_key,
             })
             
-            print(f"[EC] Ticket {ticket_key} approved by {user.email}")
+            print(f"[EC] Ticket {ticket_key} approved by {user.email} -> FST {fst_key}")
+            message = f"Ticket {ticket_key} has been approved"
+            if fst_key:
+                message += f" and handed off to {fst_key}"
             return {
                 "status": "success",
                 "ticket_key": ticket_key,
-                "message": f"Ticket {ticket_key} has been approved",
+                "fst_key": fst_key,
+                "fst_warning": fst_warning,
+                "message": message,
             }
         else:
             raise HTTPException(
@@ -1381,11 +1420,16 @@ async def jump_ticket(request: Request):
         result = client.process_jumped_ticket(ticket_key)
         
         if result["success"]:
-            fst_key = result.get("fst_key")
+            # The FST ticket is created at approval time, so prefer the already-stored
+            # fst_key; fall back to whatever the jump lookup found. Never overwrite an
+            # existing key with None.
+            existing_fst_key = (ticket_schedules.get(ticket_key) or {}).get("fst_key")
+            fst_key = existing_fst_key or result.get("fst_key")
             
             # Save fst_key to database
             if ticket_key in ticket_schedules:
-                ticket_schedules[ticket_key]["fst_key"] = fst_key
+                if fst_key:
+                    ticket_schedules[ticket_key]["fst_key"] = fst_key
                 await db.save_ticket_schedules([{
                     "key": ticket_key,
                     **ticket_schedules[ticket_key],
