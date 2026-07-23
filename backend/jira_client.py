@@ -8,6 +8,7 @@ from models import Ticket, Comment
 class JiraClient:
     LINES_FIELD = "customfield_10142"  # Total Count field
     SCREENING_DUE_DATE_FIELD = "customfield_10127"  # Screening Due date field
+    SCREENING_START_DATE_FIELD = "customfield_10129"  # Screening Start Date (FST only)
     SCREENING_LIST_LINK_FIELD = "customfield_10128"  # Screening List Link (URL)
     APPROVED_STATUS = "Approved"  # Status that allows scheduling
     JUMPED_STATUS = "Jumped"  # Status when ticket week has started and it's been processed
@@ -728,6 +729,33 @@ class JiraClient:
             print(f"Error updating due date for {ticket_key}: {e}")
             return False, week, year
     
+    def set_screening_start_date(self, ticket_key: str, week: int, year: int) -> bool:
+        """Set the Screening Start Date to the Monday of the given ISO week.
+
+        Used on the FST ticket at approval so the handoff shows when screening is
+        scheduled to *start* (Monday of the start week), separate from the due date
+        (Friday of the final week).
+        """
+        try:
+            jan4 = datetime(year, 1, 4)  # Jan 4 is always in ISO week 1
+            days_to_monday = jan4.weekday()
+            week1_monday = jan4 - timedelta(days=days_to_monday)
+            target_monday = week1_monday + timedelta(weeks=week - 1)
+            start_date_str = target_monday.strftime('%Y-%m-%d')
+
+            payload = {"fields": {self.SCREENING_START_DATE_FIELD: start_date_str}}
+            url = f"{self.base_url}/issue/{ticket_key}"
+            headers = self._get_headers()
+            with httpx.Client(timeout=30.0) as client:
+                response = client.put(url, headers=headers, json=payload)
+                response.raise_for_status()
+
+            print(f"[NoMAD App] Set start date for {ticket_key}: {start_date_str} (Mon of W{week}/{year})")
+            return True
+        except Exception as e:
+            print(f"Error setting start date for {ticket_key}: {e}")
+            return False
+
     def clear_due_date(self, ticket_key: str) -> bool:
         """Clear the due date of a ticket (used for resetting mismatched tickets)"""
         try:
@@ -1227,6 +1255,8 @@ class JiraClient:
         result["fst_key"] = fst_key
 
         # Step 4: Schedule the FST copy to the same agreed week.
+        #   - Screening Due date  = Friday of the final week (deadline).
+        #   - Screening Start Date = Monday of the start week (when work is scheduled to begin).
         if week is not None and year is not None:
             try:
                 ok_fst, _, _ = self.update_due_date(
@@ -1238,6 +1268,14 @@ class JiraClient:
             except Exception as e:
                 print(f"[NoMAD] Error scheduling FST {fst_key}: {e}")
                 warnings.append(f"scheduling FST ticket {fst_key} failed ({e})")
+
+            # Start date = Monday of the (start) week passed in.
+            try:
+                if not self.set_screening_start_date(fst_key, int(week), int(year)):
+                    warnings.append(f"setting start date on FST ticket {fst_key} failed")
+            except Exception as e:
+                print(f"[NoMAD] Error setting start date on FST {fst_key}: {e}")
+                warnings.append(f"setting start date on FST ticket {fst_key} failed ({e})")
 
         # Step 5: Link FST <-> PRES.
         try:
