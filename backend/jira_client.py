@@ -710,13 +710,22 @@ class JiraClient:
             
             due_date_str = friday.strftime('%Y-%m-%d')
             
-            # Update both the standard duedate AND the Screening Due date custom field
-            payload = {
-                "fields": {
-                    "duedate": due_date_str,
-                    self.SCREENING_DUE_DATE_FIELD: due_date_str
-                }
+            # Prefer the custom "Screening Due date" field and only include the system
+            # `duedate` when it's actually on the issue's edit screen. On the PRES CS Request
+            # screen `duedate` is NOT editable, so including it would 400 the whole update.
+            desired = {
+                "duedate": due_date_str,
+                self.SCREENING_DUE_DATE_FIELD: due_date_str,
             }
+            editable = self._get_editable_field_ids(ticket_key)
+            if editable:
+                fields = {k: v for k, v in desired.items() if k in editable}
+            else:
+                fields = desired  # editmeta unavailable; fall back to full payload
+            if not fields:
+                print(f"Error updating due date for {ticket_key}: no editable due-date field on screen")
+                return False, week, year
+            payload = {"fields": fields}
             
             url = f"{self.base_url}/issue/{ticket_key}"
             headers = self._get_headers()
@@ -725,12 +734,21 @@ class JiraClient:
                 response = client.put(url, headers=headers, json=payload)
                 response.raise_for_status()
             
+            sent = ", ".join(sorted(fields.keys()))
             if weeks_needed > 1:
-                print(f"[NoMAD App] Updated {ticket_key}: duedate={due_date_str} (spans {weeks_needed} weeks: W{week}-W{final_week}/{final_year})")
+                print(f"[NoMAD App] Updated {ticket_key}: duedate={due_date_str} via [{sent}] (spans {weeks_needed} weeks: W{week}-W{final_week}/{final_year})")
             else:
-                print(f"[NoMAD App] Updated {ticket_key}: duedate={due_date_str}")
+                print(f"[NoMAD App] Updated {ticket_key}: duedate={due_date_str} via [{sent}]")
             
             return True, final_week, final_year
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = e.response.text
+            except Exception:
+                pass
+            print(f"Error updating due date for {ticket_key}: {e} | body: {body}")
+            return False, week, year
         except Exception as e:
             print(f"Error updating due date for {ticket_key}: {e}")
             return False, week, year
@@ -738,13 +756,19 @@ class JiraClient:
     def clear_due_date(self, ticket_key: str) -> bool:
         """Clear the due date of a ticket (used for resetting mismatched tickets)"""
         try:
-            # Set both duedate fields to null
-            payload = {
-                "fields": {
-                    "duedate": None,
-                    self.SCREENING_DUE_DATE_FIELD: None
-                }
+            # Clear the custom "Screening Due date" and the system `duedate`, but only send
+            # fields that are actually on the issue's edit screen (system `duedate` is not on
+            # the PRES CS Request screen and would 400 the whole update).
+            desired = {
+                "duedate": None,
+                self.SCREENING_DUE_DATE_FIELD: None,
             }
+            editable = self._get_editable_field_ids(ticket_key)
+            fields = {k: v for k, v in desired.items() if k in editable} if editable else desired
+            if not fields:
+                print(f"Error clearing due date for {ticket_key}: no editable due-date field on screen")
+                return False
+            payload = {"fields": fields}
             
             url = f"{self.base_url}/issue/{ticket_key}"
             headers = self._get_headers()
@@ -992,6 +1016,21 @@ class JiraClient:
             return {f.get("fieldId") for f in fields if f.get("fieldId")}
         except Exception as e:
             print(f"[NoMAD] Could not fetch createmeta for {project_key}/{issue_type_id}: {e}")
+            return set()
+
+    def _get_editable_field_ids(self, ticket_key: str) -> set:
+        """Return the set of field IDs on the edit screen for a specific issue.
+
+        Fields not on the edit screen (e.g. the system ``duedate`` on the PRES CS Request
+        screen) cause a 400 if included in an update payload, so callers use this to filter.
+        Returns an empty set if editmeta can't be fetched (callers then send the full payload
+        and rely on error handling).
+        """
+        try:
+            result = self._make_request("GET", f"issue/{ticket_key}/editmeta")
+            return set((result.get("fields") or {}).keys())
+        except Exception as e:
+            print(f"[NoMAD] Could not fetch editmeta for {ticket_key}: {e}")
             return set()
 
     def set_fst_screening_dates(
